@@ -1,0 +1,11 @@
+services:
+  rundown:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - rundown-data:/data
+    restart: unless-stopped
+
+volumes:
+  rundown-data:

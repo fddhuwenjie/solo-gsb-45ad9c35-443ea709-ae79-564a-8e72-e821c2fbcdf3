@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>直播节目串联单</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>📺 直播节目串联单</h1>
+    <div id="clock" class="clock"></div>
+  </header>
+
+  <main>
+    <!-- 创建节目 -->
+    <section id="setup-view" class="card hidden">
+      <h2>创建节目</h2>
+      <div class="form-grid">
+        <label>节目起点
+          <input type="datetime-local" id="setup-start">
+        </label>
+        <label>总时长（秒）
+          <input type="number" id="setup-total" min="1" value="3600">
+        </label>
+      </div>
+      <h3>串联单 <span class="hint">按播出顺序录入；赞助段为固定时长，访谈段需给出最短 / 目标 / 最长秒数</span></h3>
+      <div id="setup-segments"></div>
+      <div class="btn-row">
+        <button id="add-sponsor" type="button">＋ 赞助段</button>
+        <button id="add-interview" type="button">＋ 访谈段</button>
+      </div>
+      <div id="setup-error" class="error"></div>
+      <button id="create-show" class="primary" type="button">创建节目并排程</button>
+    </section>
+
+    <!-- 实况与待播排期 -->
+    <section id="live-view" class="hidden">
+      <div id="conflict-banner" class="banner hidden"></div>
+      <div class="cards" id="summary-cards"></div>
+
+      <div class="card" id="current-panel"></div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>串联单</h2>
+          <div class="btn-row">
+            <button id="edit-btn" type="button">编辑待播清单</button>
+            <button id="reset-btn" class="danger" type="button">重置节目</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table id="segments-table">
+            <thead>
+              <tr>
+                <th>#</th><th>类型</th><th>标题</th><th>时长参数</th>
+                <th>计划</th><th>预计开始</th><th>预计结束</th><th>状态</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card hidden" id="edit-panel">
+        <h2>编辑待播清单</h2>
+        <p class="hint">
+          赞助段已锁定（时长与先后顺序不可变）；可插入、删除、移动访谈段，
+          或调整访谈段的最短 / 目标 / 最长秒数。保存时将按剩余时间重新排程，
+          无法恰好排到节目终点则拒绝保存。
+        </p>
+        <div id="edit-rows"></div>
+        <div class="btn-row">
+          <button id="edit-add-interview" type="button">＋ 新增访谈段</button>
+        </div>
+        <div id="edit-error" class="error"></div>
+        <div class="btn-row">
+          <button id="edit-save" class="primary" type="button">保存并重排</button>
+          <button id="edit-cancel" type="button">取消</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
