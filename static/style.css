@@ -134,6 +134,8 @@ button.danger:hover { background: rgba(229, 83, 75, 0.12); }
 
 .cur-title { font-size: 22px; font-weight: 600; margin: 4px 0; }
 #actual-input { width: 140px; }
+#backup-name { width: 200px; }
+#backup-summary { margin-bottom: 10px; }
 
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }

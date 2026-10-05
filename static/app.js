@@ -222,6 +222,63 @@ function renderLive() {
   });
 
   $('edit-btn').disabled = pending.length === 0;
+
+  renderBackup();
+}
+
+/* ---------- 备播方案 ---------- */
+
+function renderBackup() {
+  const panel = $('backup-panel');
+  const b = state.backup;
+  if (!b) {
+    panel.classList.add('hidden');
+    return;
+  }
+  panel.classList.remove('hidden');
+  $('backup-title').textContent = b.name;
+
+  const note = $('backup-note');
+  if (b.reasons && b.reasons.length > 0) {
+    note.classList.remove('hidden');
+    note.textContent = '⚠ 备播当前不可启用：' + b.reasons.join('；');
+  } else {
+    note.classList.add('hidden');
+  }
+
+  const first = b.segments[0];
+  $('backup-summary').textContent = b.segments.length > 0
+    ? `备播剩余 ${b.segments.length} 段，按最新实播记录重算：预计 ${fmtClock(first.est_start)} 起、${fmtClock(b.est_end)} 止。`
+    : '备播清单已全部播出。';
+
+  const tbody = $('backup-table').querySelector('tbody');
+  tbody.innerHTML = '';
+  b.segments.forEach((s, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${i + 1}</td>
+      <td><span class="tag tag-${s.type}">${s.type === 'sponsor' ? '赞助段' : '访谈段'}</span></td>
+      <td>${escapeHtml(s.title)}</td>
+      <td class="muted">${segmentParams(s)}</td>
+      <td>${fmtDur(s.planned_seconds)}</td>
+      <td>${fmtClock(s.est_start)}</td>
+      <td>${fmtClock(s.est_end)}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  $('backup-apply').disabled = !b.applicable;
+}
+
+async function applyBackup() {
+  if (!state.backup) return;
+  if (!confirm(`启用备播方案「${state.backup.name}」？\n将一次性替换当前待播清单与排期。`)) return;
+  const res = await postJSON('/api/backup/apply', {});
+  if (!res.ok) {
+    alert(res.error || '启用失败');
+    return;
+  }
+  state = res.state;
+  render();
 }
 
 /* ---------- 结束当前段 ---------- */
@@ -254,6 +311,7 @@ function enterEdit() {
     .filter((s) => s.status === 'pending')
     .map((s) => ({ ...s }));
   $('edit-error').textContent = '';
+  $('backup-name').value = state.backup ? state.backup.name : '';
   $('edit-panel').classList.remove('hidden');
   renderEdit();
   $('edit-panel').scrollIntoView({ behavior: 'smooth' });
@@ -319,20 +377,37 @@ function addEditInterview() {
   renderEdit();
 }
 
+function editRowsPayload() {
+  return editRows.map((r) => (r.type === 'sponsor'
+    ? { id: r.id, type: 'sponsor', fixed_seconds: r.fixed_seconds }
+    : {
+        ...(r.id ? { id: r.id } : {}),
+        type: 'interview',
+        title: r.title,
+        min_seconds: parseInt(r.min_seconds, 10),
+        target_seconds: parseInt(r.target_seconds, 10),
+        max_seconds: parseInt(r.max_seconds, 10),
+      }));
+}
+
 async function saveEdit() {
-  const payload = {
-    segments: editRows.map((r) => (r.type === 'sponsor'
-      ? { id: r.id, type: 'sponsor', fixed_seconds: r.fixed_seconds }
-      : {
-          ...(r.id ? { id: r.id } : {}),
-          type: 'interview',
-          title: r.title,
-          min_seconds: parseInt(r.min_seconds, 10),
-          target_seconds: parseInt(r.target_seconds, 10),
-          max_seconds: parseInt(r.max_seconds, 10),
-        })),
-  };
-  const res = await postJSON('/api/rundown/edit', payload);
+  const res = await postJSON('/api/rundown/edit', { segments: editRowsPayload() });
+  if (!res.ok) {
+    $('edit-error').textContent = res.error || '保存失败';
+    return;
+  }
+  cancelEdit();
+  state = res.state;
+  render();
+}
+
+async function saveBackup() {
+  const name = ($('backup-name').value || '').trim();
+  if (!name) {
+    $('edit-error').textContent = '请为备播方案命名';
+    return;
+  }
+  const res = await postJSON('/api/backup', { name, segments: editRowsPayload() });
   if (!res.ok) {
     $('edit-error').textContent = res.error || '保存失败';
     return;
@@ -382,6 +457,8 @@ function init() {
   $('edit-add-interview').addEventListener('click', addEditInterview);
   $('edit-save').addEventListener('click', saveEdit);
   $('edit-cancel').addEventListener('click', cancelEdit);
+  $('edit-save-backup').addEventListener('click', saveBackup);
+  $('backup-apply').addEventListener('click', applyBackup);
   $('reset-btn').addEventListener('click', resetShow);
 
   setInterval(() => {

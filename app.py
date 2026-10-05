@@ -8,6 +8,10 @@
   无法排满或超时则给出差额并拒绝该次操作。
 - 每结束当前段录入实际秒数；记录必须保留，哪怕余下清单因此无解
   （标记冲突并允许再次编辑）；已播记录不可改写。
+- 可在待播编辑区把另一种访谈编排存为一份可命名的备播方案；保存与查看
+  均不改变正在播出的清单。启用备播时校验：保存后已播的段是备播原清单
+  同序的开头、备播引用的其余旧段仍待播、赞助段与现行待播赞助一致、
+  按最新实播时长能排到节目终点；全部通过则一次性替换待播清单与排期。
 """
 
 import os
@@ -43,6 +47,23 @@ CREATE TABLE IF NOT EXISTS segments (
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done')),
     actual_seconds INTEGER,          -- 已播段的实际秒数（不可改写）
     completed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS backup_plans (
+    id INTEGER PRIMARY KEY CHECK (id = 1),  -- 仅一份备播方案
+    name TEXT NOT NULL,              -- 备播方案名称
+    base_done_count INTEGER NOT NULL, -- 保存时已播段数（已播段位置固定为清单前缀）
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS backup_segments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position INTEGER NOT NULL,       -- 在备播清单中的顺序
+    seg_id INTEGER,                  -- 引用的现有段落；备播中新增的访谈段为 NULL
+    type TEXT NOT NULL CHECK (type IN ('sponsor', 'interview')),
+    title TEXT NOT NULL,
+    fixed_seconds INTEGER,
+    target_seconds INTEGER,
+    min_seconds INTEGER,
+    max_seconds INTEGER
 );
 """
 
@@ -161,6 +182,70 @@ def parse_segment(raw, idx):
     return None, f"第 {idx + 1} 段类型无效"
 
 
+def validate_pending_rundown(raw, pending):
+    """校验一份待播清单（编辑与备播保存共用）。
+
+    赞助段必须与现行待播赞助一一对应（先后顺序与时长不可变）；
+    访谈段可增、删、移动，引用旧段时该段必须仍在待播。
+    返回 (new_rows, error)；new_rows 中引用旧段的项含 'id'。
+    """
+    pending_by_id = {s["id"]: s for s in pending}
+    old_sponsors = [s for s in pending if s["type"] == "sponsor"]
+
+    new_rows = []
+    sponsor_idx = 0
+    for i, r in enumerate(raw):
+        if not isinstance(r, dict):
+            return None, "提交格式无效"
+        if r.get("type") == "sponsor":
+            # 赞助段：必须与原待播赞助段一一对应，顺序与时长不可变
+            if sponsor_idx >= len(old_sponsors):
+                return None, "赞助段的数量不能改变"
+            old = old_sponsors[sponsor_idx]
+            sponsor_idx += 1
+            try:
+                rid = int(r.get("id"))
+                fixed = int(r.get("fixed_seconds"))
+            except (TypeError, ValueError):
+                return None, "赞助段参数无效"
+            if rid != old["id"]:
+                return None, "赞助段的先后顺序不能改变"
+            if fixed != old["fixed_seconds"]:
+                return None, f"赞助段「{old['title']}」的时长不能改变"
+            new_rows.append(
+                {
+                    "id": old["id"],
+                    "type": "sponsor",
+                    "title": old["title"],
+                    "fixed_seconds": old["fixed_seconds"],
+                }
+            )
+        elif r.get("type") == "interview":
+            seg, err = parse_segment(r, i)
+            if err:
+                return None, err
+            if r.get("id") is not None:
+                try:
+                    rid = int(r.get("id"))
+                except (TypeError, ValueError):
+                    return None, "段落编号无效"
+                old = pending_by_id.get(rid)
+                if old is None or old["type"] != "interview":
+                    return None, "只能编辑未播出的访谈段"
+                seg["id"] = rid
+            new_rows.append(seg)
+        else:
+            return None, f"第 {i + 1} 段类型无效"
+
+    if sponsor_idx != len(old_sponsors):
+        return None, "赞助段不能删除"
+
+    kept_ids = [r["id"] for r in new_rows if "id" in r]
+    if len(kept_ids) != len(set(kept_ids)):
+        return None, "段落重复"
+    return new_rows, None
+
+
 def get_show(db):
     return db.execute("SELECT * FROM show_meta WHERE id = 1").fetchone()
 
@@ -187,11 +272,91 @@ def display_duration(seg):
 
 # ---------- 状态 ----------
 
+def build_backup_state(db, show, start, aired):
+    """备播方案的展示状态：按最新实播记录重算各段起止时间。
+
+    不修改任何数据；若按当前剩余时间已无法恰好排满，附带差额。
+    """
+    plan = db.execute("SELECT * FROM backup_plans WHERE id = 1").fetchone()
+    if not plan:
+        return None
+    bsegs = [
+        dict(r)
+        for r in db.execute(
+            "SELECT * FROM backup_segments ORDER BY position"
+        ).fetchall()
+    ]
+    # 保存备播后新播出的段（已播段位置固定为清单前缀，按位置顺序即播出顺序）
+    done = db.execute(
+        "SELECT * FROM segments WHERE status = 'done' ORDER BY position"
+    ).fetchall()
+    aired_since = done[plan["base_done_count"]:]
+
+    reasons = []
+    k = len(aired_since)
+    prefix_ok = k <= len(bsegs) and all(
+        bsegs[i]["seg_id"] == aired_since[i]["id"] for i in range(k)
+    )
+    entries = bsegs[k:] if prefix_ok else bsegs
+    if not prefix_ok:
+        reasons.append("备播保存后已播出的段落与备播原清单开头不一致，备播已过期")
+    else:
+        pending = get_pending(db)
+        pending_by_id = {s["id"]: s for s in pending}
+        for e in entries:
+            if e["seg_id"] is not None and e["seg_id"] not in pending_by_id:
+                reasons.append(f"备播引用的段落「{e['title']}」已不在待播清单中")
+                break
+        cur_sponsors = [s for s in pending if s["type"] == "sponsor"]
+        bak_sponsors = [e for e in entries if e["type"] == "sponsor"]
+        if len(bak_sponsors) != len(cur_sponsors) or any(
+            e["seg_id"] != s["id"] or e["fixed_seconds"] != s["fixed_seconds"]
+            for e, s in zip(bak_sponsors, cur_sponsors)
+        ):
+            reasons.append("备播的赞助段与现行待播赞助不一致")
+
+    remaining = show["total_seconds"] - aired
+    plans, perr = compute_plan(entries, remaining)
+    diff = None
+    if perr:
+        diff = perr[1] if perr[0] == "under" else -perr[1]
+        reasons.append(plan_error_message(perr))
+
+    offset = aired
+    out = []
+    for i, e in enumerate(entries):
+        dur = plans[i] if plans else display_duration(e)
+        out.append(
+            {
+                "type": e["type"],
+                "title": e["title"],
+                "fixed_seconds": e["fixed_seconds"],
+                "target_seconds": e["target_seconds"],
+                "min_seconds": e["min_seconds"],
+                "max_seconds": e["max_seconds"],
+                "planned_seconds": dur,
+                "est_start": (start + timedelta(seconds=offset)).isoformat(),
+                "est_end": (start + timedelta(seconds=offset + dur)).isoformat(),
+            }
+        )
+        offset += dur
+    return {
+        "name": plan["name"],
+        "created_at": plan["created_at"],
+        "applicable": not reasons,
+        "reasons": reasons,
+        "conflict_diff": diff,
+        "segments": out,
+        "est_end": (start + timedelta(seconds=offset)).isoformat(),
+    }
+
+
 def build_state():
     db = get_db()
     show = get_show(db)
     if not show:
-        return {"show": None, "segments": [], "now": datetime.now().isoformat()}
+        return {"show": None, "segments": [], "backup": None,
+                "now": datetime.now().isoformat()}
 
     segs = [dict(r) for r in db.execute("SELECT * FROM segments ORDER BY position").fetchall()]
     start = datetime.fromisoformat(show["start_at"])
@@ -216,6 +381,7 @@ def build_state():
             "est_end": (start + timedelta(seconds=offset)).isoformat(),
         },
         "segments": segs,
+        "backup": build_backup_state(db, show, start, aired),
         "now": datetime.now().isoformat(),
     }
 
@@ -367,68 +533,9 @@ def edit_rundown():
     if not isinstance(raw, list):
         return jsonify({"ok": False, "error": "提交格式无效"}), 400
 
-    pending_by_id = {s["id"]: s for s in pending}
-    old_sponsors = [s for s in pending if s["type"] == "sponsor"]
-
-    new_rows = []
-    sponsor_idx = 0
-    for i, r in enumerate(raw):
-        if not isinstance(r, dict):
-            return jsonify({"ok": False, "error": "提交格式无效"}), 400
-        if r.get("type") == "sponsor":
-            # 赞助段：必须与原待播赞助段一一对应，顺序与时长不可变
-            if sponsor_idx >= len(old_sponsors):
-                return jsonify({"ok": False, "error": "赞助段的数量不能改变"}), 400
-            old = old_sponsors[sponsor_idx]
-            sponsor_idx += 1
-            try:
-                rid = int(r.get("id"))
-                fixed = int(r.get("fixed_seconds"))
-            except (TypeError, ValueError):
-                return jsonify({"ok": False, "error": "赞助段参数无效"}), 400
-            if rid != old["id"]:
-                return jsonify({"ok": False, "error": "赞助段的先后顺序不能改变"}), 400
-            if fixed != old["fixed_seconds"]:
-                return (
-                    jsonify(
-                        {
-                            "ok": False,
-                            "error": f"赞助段「{old['title']}」的时长不能改变",
-                        }
-                    ),
-                    400,
-                )
-            new_rows.append(
-                {
-                    "id": old["id"],
-                    "type": "sponsor",
-                    "title": old["title"],
-                    "fixed_seconds": old["fixed_seconds"],
-                }
-            )
-        elif r.get("type") == "interview":
-            seg, err = parse_segment(r, i)
-            if err:
-                return jsonify({"ok": False, "error": err}), 400
-            if r.get("id") is not None:
-                try:
-                    rid = int(r.get("id"))
-                except (TypeError, ValueError):
-                    return jsonify({"ok": False, "error": "段落编号无效"}), 400
-                old = pending_by_id.get(rid)
-                if old is None or old["type"] != "interview":
-                    return jsonify({"ok": False, "error": "只能编辑未播出的访谈段"}), 400
-                seg["id"] = rid
-            new_rows.append(seg)
-        else:
-            return jsonify({"ok": False, "error": f"第 {i + 1} 段类型无效"}), 400
-
-    if sponsor_idx != len(old_sponsors):
-        return jsonify({"ok": False, "error": "赞助段不能删除"}), 400
-
-    kept_ids = [r["id"] for r in new_rows if "id" in r]
-    if len(kept_ids) != len(set(kept_ids)):
-        return jsonify({"ok": False, "error": "段落重复"}), 400
+    new_rows, err = validate_pending_rundown(raw, pending)
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
 
     # 排程：无法恰好排到终点则拒绝此次编辑
     remaining = show["total_seconds"] - get_aired_seconds(db)
@@ -442,7 +549,7 @@ def edit_rundown():
         )
 
     # 应用：删除未保留的待播访谈段，重排全部位置（已播段是清单前缀，位置不变）
-    kept = set(kept_ids)
+    kept = {r["id"] for r in new_rows if "id" in r}
     for s in pending:
         if s["id"] not in kept:
             db.execute("DELETE FROM segments WHERE id = ?", (s["id"],))
@@ -493,12 +600,226 @@ def edit_rundown():
     return jsonify({"ok": True, "state": build_state()})
 
 
+@app.route("/api/backup", methods=["POST"])
+def save_backup():
+    """把编辑区中的另一种访谈编排存为（可命名的）备播方案。
+
+    沿用待播编辑的赞助约束与排程规则；只写入备播，不改变正在播出的清单。
+    再次保存会覆盖旧方案。
+    """
+    db = get_db()
+    show = get_show(db)
+    if not show:
+        return jsonify({"ok": False, "error": "尚未创建节目"}), 400
+    pending = get_pending(db)
+    if not pending:
+        return jsonify({"ok": False, "error": "没有可编排的待播段落"}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "请为备播方案命名"}), 400
+    if len(name) > 50:
+        return jsonify({"ok": False, "error": "备播名称过长（最多 50 字）"}), 400
+
+    raw = data.get("segments")
+    if not isinstance(raw, list):
+        return jsonify({"ok": False, "error": "提交格式无效"}), 400
+
+    new_rows, err = validate_pending_rundown(raw, pending)
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+
+    # 排程：无法恰好排到终点则拒绝保存（沿用编辑的排程规则）
+    remaining = show["total_seconds"] - get_aired_seconds(db)
+    plans, perr = compute_plan(new_rows, remaining)
+    if perr:
+        return (
+            jsonify(
+                {"ok": False, "error": plan_error_message(perr) + "，备播未保存"}
+            ),
+            400,
+        )
+
+    done_count = db.execute(
+        "SELECT COUNT(*) AS c FROM segments WHERE status = 'done'"
+    ).fetchone()["c"]
+
+    db.execute("DELETE FROM backup_segments")
+    db.execute("DELETE FROM backup_plans")
+    db.execute(
+        "INSERT INTO backup_plans (id, name, base_done_count, created_at) "
+        "VALUES (1, ?, ?, ?)",
+        (name, done_count, datetime.now().isoformat()),
+    )
+    for pos, row in enumerate(new_rows):
+        db.execute(
+            "INSERT INTO backup_segments (position, seg_id, type, title, "
+            "fixed_seconds, target_seconds, min_seconds, max_seconds) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                pos,
+                row.get("id"),
+                row["type"],
+                row["title"],
+                row.get("fixed_seconds"),
+                row.get("target_seconds"),
+                row.get("min_seconds"),
+                row.get("max_seconds"),
+            ),
+        )
+    db.commit()
+    return jsonify({"ok": True, "state": build_state()})
+
+
+@app.route("/api/backup/apply", methods=["POST"])
+def apply_backup():
+    """启用备播：校验通过后一次性替换待播清单与排期，并清除已解决的冲突。
+
+    任一校验失败则说明原因，原清单、冲突、已播记录及备播方案均不变。
+    """
+    db = get_db()
+    show = get_show(db)
+    if not show:
+        return jsonify({"ok": False, "error": "尚未创建节目"}), 400
+    plan = db.execute("SELECT * FROM backup_plans WHERE id = 1").fetchone()
+    if not plan:
+        return jsonify({"ok": False, "error": "没有备播方案"}), 400
+    bsegs = [
+        dict(r)
+        for r in db.execute(
+            "SELECT * FROM backup_segments ORDER BY position"
+        ).fetchall()
+    ]
+
+    # 1) 保存备播后已播的段必须是备播原清单中同序的开头
+    done = db.execute(
+        "SELECT * FROM segments WHERE status = 'done' ORDER BY position"
+    ).fetchall()
+    aired_since = done[plan["base_done_count"]:]
+    k = len(aired_since)
+    if k > len(bsegs) or any(
+        bsegs[i]["seg_id"] != aired_since[i]["id"] for i in range(k)
+    ):
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "备播保存后已播出的段落不是备播原清单的同序开头，"
+                    "备播已过期，未启用",
+                }
+            ),
+            400,
+        )
+    entries = bsegs[k:]
+
+    # 2) 备播引用的其余旧段仍待播
+    pending = get_pending(db)
+    pending_by_id = {s["id"]: s for s in pending}
+    for e in entries:
+        if e["seg_id"] is not None and e["seg_id"] not in pending_by_id:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": f"备播引用的段落「{e['title']}」已不在待播清单中，"
+                        "备播未启用",
+                    }
+                ),
+                400,
+            )
+
+    # 3) 赞助段与现行待播赞助一致
+    cur_sponsors = [s for s in pending if s["type"] == "sponsor"]
+    bak_sponsors = [e for e in entries if e["type"] == "sponsor"]
+    if len(bak_sponsors) != len(cur_sponsors) or any(
+        e["seg_id"] != s["id"] or e["fixed_seconds"] != s["fixed_seconds"]
+        for e, s in zip(bak_sponsors, cur_sponsors)
+    ):
+        return (
+            jsonify(
+                {"ok": False, "error": "备播的赞助段与现行待播赞助不一致，备播未启用"}
+            ),
+            400,
+        )
+
+    # 4) 按最新实播时长能恰好排到节目终点
+    remaining = show["total_seconds"] - get_aired_seconds(db)
+    plans, perr = compute_plan(entries, remaining)
+    if perr:
+        return (
+            jsonify(
+                {"ok": False, "error": plan_error_message(perr) + "，备播未启用"}
+            ),
+            400,
+        )
+
+    # 一次性替换待播清单与排期（同一事务提交）
+    keep = {e["seg_id"] for e in entries if e["seg_id"] is not None}
+    for s in pending:
+        if s["id"] not in keep:
+            db.execute("DELETE FROM segments WHERE id = ?", (s["id"],))
+
+    pos = db.execute(
+        "SELECT COALESCE(MAX(position), -1) AS p FROM segments WHERE status = 'done'"
+    ).fetchone()["p"] + 1
+    for e, plan_secs in zip(entries, plans):
+        if e["seg_id"] is not None:
+            if e["type"] == "sponsor":
+                db.execute(
+                    "UPDATE segments SET position = ?, planned_seconds = ? WHERE id = ?",
+                    (pos, plan_secs, e["seg_id"]),
+                )
+            else:
+                db.execute(
+                    "UPDATE segments SET position = ?, title = ?, target_seconds = ?, "
+                    "min_seconds = ?, max_seconds = ?, planned_seconds = ? "
+                    "WHERE id = ? AND status = 'pending'",
+                    (
+                        pos,
+                        e["title"],
+                        e["target_seconds"],
+                        e["min_seconds"],
+                        e["max_seconds"],
+                        plan_secs,
+                        e["seg_id"],
+                    ),
+                )
+        else:
+            cur = db.execute(
+                "INSERT INTO segments (position, type, title, target_seconds, "
+                "min_seconds, max_seconds, planned_seconds, status) "
+                "VALUES (?, 'interview', ?, ?, ?, ?, ?, 'pending')",
+                (
+                    pos,
+                    e["title"],
+                    e["target_seconds"],
+                    e["min_seconds"],
+                    e["max_seconds"],
+                    plan_secs,
+                ),
+            )
+            # 备播中的新增段已落入正式清单：回写引用，保持备播可继续查看
+            db.execute(
+                "UPDATE backup_segments SET seg_id = ? WHERE id = ?",
+                (cur.lastrowid, e["id"]),
+            )
+        pos += 1
+
+    # 清除已解决的冲突
+    db.execute("UPDATE show_meta SET conflict_diff = NULL WHERE id = 1")
+    db.commit()
+    return jsonify({"ok": True, "state": build_state()})
+
+
 @app.route("/api/show/reset", methods=["POST"])
 def reset_show():
-    """删除整档节目（含全部记录），用于重新开始。"""
+    """删除整档节目（含全部记录与备播方案），用于重新开始。"""
     db = get_db()
     db.execute("DELETE FROM segments")
     db.execute("DELETE FROM show_meta")
+    db.execute("DELETE FROM backup_segments")
+    db.execute("DELETE FROM backup_plans")
     db.commit()
     return jsonify({"ok": True})
 
