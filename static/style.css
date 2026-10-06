@@ -143,3 +143,44 @@ th { color: var(--muted); font-size: 13px; font-weight: normal; }
 .row-current { background: rgba(77, 163, 255, 0.08); }
 .current { color: var(--accent); font-weight: 600; }
 .done { color: var(--muted); }
+
+/* ---------- 备播方案 ---------- */
+.backup-save-row { border-top: 1px dashed var(--border); padding-top: 12px; }
+#edit-bk-name { width: auto; }
+.backup-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  background: rgba(77, 163, 255, 0.03);
+}
+.backup-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.backup-name { font-size: 16px; font-weight: 600; }
+.backup-meta { color: var(--muted); font-size: 13px; }
+.backup-head .btn-row { margin-top: 0; margin-left: auto; }
+.bk-status {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.bk-ready { background: rgba(56, 193, 114, 0.15); color: var(--interview); }
+.bk-conflict { background: rgba(229, 83, 75, 0.15); color: var(--danger); }
+.bk-incompatible { background: rgba(139, 150, 173, 0.18); color: var(--muted); }
+.backup-reason {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: #ffc98a;
+}
+.backup-times { color: var(--muted); font-size: 13px; margin-top: 6px; }
+.backup-times .diff-under { color: #ffc98a; }
+.backup-times .diff-over { color: var(--danger); }
+.bk-seg-aired { opacity: 0.55; }
+.bk-seg-new { color: var(--accent); font-size: 12px; }
+.empty-hint { color: var(--muted); font-size: 13px; padding: 6px 0; }

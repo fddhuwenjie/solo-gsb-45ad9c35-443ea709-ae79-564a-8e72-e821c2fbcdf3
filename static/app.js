@@ -222,6 +222,8 @@ function renderLive() {
   });
 
   $('edit-btn').disabled = pending.length === 0;
+
+  renderBackups();
 }
 
 /* ---------- 结束当前段 ---------- */
@@ -254,6 +256,8 @@ function enterEdit() {
     .filter((s) => s.status === 'pending')
     .map((s) => ({ ...s }));
   $('edit-error').textContent = '';
+  $('edit-bk-msg').textContent = '';
+  $('edit-bk-name').value = '';
   $('edit-panel').classList.remove('hidden');
   renderEdit();
   $('edit-panel').scrollIntoView({ behavior: 'smooth' });
@@ -319,8 +323,8 @@ function addEditInterview() {
   renderEdit();
 }
 
-async function saveEdit() {
-  const payload = {
+function collectEditPayload() {
+  return {
     segments: editRows.map((r) => (r.type === 'sponsor'
       ? { id: r.id, type: 'sponsor', fixed_seconds: r.fixed_seconds }
       : {
@@ -332,7 +336,10 @@ async function saveEdit() {
           max_seconds: parseInt(r.max_seconds, 10),
         })),
   };
-  const res = await postJSON('/api/rundown/edit', payload);
+}
+
+async function saveEdit() {
+  const res = await postJSON('/api/rundown/edit', collectEditPayload());
   if (!res.ok) {
     $('edit-error').textContent = res.error || '保存失败';
     return;
@@ -340,6 +347,124 @@ async function saveEdit() {
   cancelEdit();
   state = res.state;
   render();
+}
+
+async function saveBackup() {
+  const name = $('edit-bk-name').value.trim();
+  const msg = $('edit-bk-msg');
+  msg.textContent = '';
+  if (!name) {
+    alert('请先为备播方案命名');
+    return;
+  }
+  const res = await postJSON('/api/backups', { name, ...collectEditPayload() });
+  if (!res.ok) {
+    $('edit-error').textContent = res.error || '备播保存失败';
+    return;
+  }
+  // 保存备播不改变正在播出的清单，也不退出编辑（可继续调整另存一份）
+  $('edit-error').textContent = '';
+  state = res.state;
+  msg.textContent = `已存为备播「${name}」，当前播出清单未改变`;
+  renderBackups();
+}
+
+/* ---------- 备播方案 ---------- */
+
+function backupStatusTag(bk) {
+  if (bk.status === 'ready') return '<span class="bk-status bk-ready">可启用</span>';
+  if (bk.status === 'conflict') return '<span class="bk-status bk-conflict">当前排不满</span>';
+  return '<span class="bk-status bk-incompatible">无法启用</span>';
+}
+
+function backupDiffHtml(bk) {
+  if (bk.status === 'ready') {
+    return `预计 ${fmtClock(bk.est_start)} – ${fmtClock(bk.est_end)}（恰好排到节目终点 ${fmtClock(bk.program_end)}）`;
+  }
+  if (bk.status === 'conflict') {
+    const cls = bk.diff_seconds > 0 ? 'diff-under' : 'diff-over';
+    const word = bk.diff_seconds > 0
+      ? `无法排满，仍差 ${bk.diff_seconds} 秒`
+      : `将超时 ${-bk.diff_seconds} 秒`;
+    return `预计 ${fmtClock(bk.est_start)} – ${fmtClock(bk.est_end)}，<span class="${cls}">${word}</span>`;
+  }
+  return '与已播记录不兼容，无法按最新实播排程';
+}
+
+function renderBackups() {
+  const card = $('backups-card');
+  const list = $('backups-list');
+  const backups = (state && state.backups) || [];
+  if (!state || !state.show || backups.length === 0) {
+    card.classList.add('hidden');
+    return;
+  }
+  card.classList.remove('hidden');
+  list.innerHTML = '';
+  backups.forEach((bk) => {
+    const div = document.createElement('div');
+    div.className = 'backup-item';
+    const rows = bk.segments.map((s, i) => {
+      const newTag = s.match_status === 'new' ? '<span class="bk-seg-new">新增</span>' : '';
+      const rowCls = s.match_status === 'aired' ? ' class="bk-seg-aired"' : '';
+      return `
+        <tr${rowCls}>
+          <td>${i + 1}</td>
+          <td><span class="tag tag-${s.type}">${s.type === 'sponsor' ? '赞助段' : '访谈段'}</span></td>
+          <td>${escapeHtml(s.title)} ${newTag}</td>
+          <td>${fmtDur(s.planned_seconds)}</td>
+          <td>${fmtClock(s.est_start)}</td>
+          <td>${fmtClock(s.est_end)}</td>
+          <td class="muted">${s.match_status === 'aired' ? '已播出' : (s.match_status === 'new' ? '新段' : '待播引用')}</td>
+        </tr>`;
+    }).join('');
+    div.innerHTML = `
+      <div class="backup-head">
+        <span class="backup-name">💾 ${escapeHtml(bk.name)}</span>
+        ${backupStatusTag(bk)}
+        <span class="backup-meta">保存于 ${fmtDateTime(bk.created_at)}（保存时已播 ${bk.aired_count} 段）</span>
+        <span class="btn-row">
+          <button class="primary bk-activate" type="button" ${bk.status === 'ready' ? '' : 'disabled'}>启用并替换待播</button>
+          <button class="danger bk-delete" type="button">删除</button>
+        </span>
+      </div>
+      ${bk.reason ? `<p class="backup-reason">⚠ ${escapeHtml(bk.reason)}</p>` : ''}
+      <div class="backup-times">${backupDiffHtml(bk)}</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>类型</th><th>标题</th><th>计划</th><th>预计开始</th><th>预计结束</th><th>匹配</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+    div.querySelector('.bk-activate').addEventListener('click', () => activateBackup(bk));
+    div.querySelector('.bk-delete').addEventListener('click', () => deleteBackup(bk));
+    list.appendChild(div);
+  });
+}
+
+async function activateBackup(bk) {
+  if (!confirm(`启用备播「${bk.name}」？\n\n将一次性替换当前待播清单与排期，已播记录保持不变。`)) return;
+  const res = await postJSON(`/api/backups/${bk.id}/activate`, {});
+  if (!res.ok) {
+    alert(res.error || '启用失败，清单未改变');
+    return;
+  }
+  editing = false;
+  editRows = [];
+  $('edit-panel').classList.add('hidden');
+  state = res.state;
+  render();
+}
+
+async function deleteBackup(bk) {
+  if (!confirm(`删除备播方案「${bk.name}」？不影响正在播出的清单。`)) return;
+  const res = await postJSON(`/api/backups/${bk.id}/delete`, {});
+  if (!res.ok) {
+    alert(res.error || '删除失败');
+    return;
+  }
+  state = res.state;
+  renderBackups();
 }
 
 /* ---------- 重置 ---------- */
@@ -381,6 +506,7 @@ function init() {
   $('edit-btn').addEventListener('click', enterEdit);
   $('edit-add-interview').addEventListener('click', addEditInterview);
   $('edit-save').addEventListener('click', saveEdit);
+  $('edit-save-backup').addEventListener('click', saveBackup);
   $('edit-cancel').addEventListener('click', cancelEdit);
   $('reset-btn').addEventListener('click', resetShow);
 

@@ -74,10 +74,23 @@
           <button id="edit-add-interview" type="button">＋ 新增访谈段</button>
         </div>
         <div id="edit-error" class="error"></div>
+        <div class="btn-row backup-save-row">
+          <input type="text" id="edit-bk-name" maxlength="40" placeholder="备播方案名称" style="width:220px">
+          <button id="edit-save-backup" type="button">💾 存为备播方案</button>
+          <span id="edit-bk-msg" class="hint"></span>
+        </div>
         <div class="btn-row">
-          <button id="edit-save" class="primary" type="button">保存并重排</button>
+          <button id="edit-save" class="primary" type="button">保存并重排（替换当前待播）</button>
           <button id="edit-cancel" type="button">取消</button>
         </div>
+      </div>
+
+      <div class="card hidden" id="backups-card">
+        <div class="card-head">
+          <h2>备播方案</h2>
+          <span class="hint">按最新实播记录重算起止时间；保存与查看均不改变正在播出的清单</span>
+        </div>
+        <div id="backups-list"></div>
       </div>
     </section>
   </main>
